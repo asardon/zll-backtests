@@ -85,7 +85,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date):
 
     # Calculate trailing volatility (e.g., 30-day rolling std deviation)
     df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
-    df_filtered['volatility'] = df_filtered['log_returns'].rolling(window=30).std()
+    df_filtered['volatility'] = df_filtered['log_returns'].rolling(window=30).std() * (365**0.5)
 
     ax2.plot(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility'], color='red', label='Volatility')
     ax2.fill_between(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility'], color="red", alpha=0.3)
