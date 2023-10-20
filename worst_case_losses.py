@@ -43,7 +43,18 @@ def simulate_default_and_loss_rate(merged_df, price_column_name, loan_tenors, lt
         loss_stddev=('loss', 'std')
     ).reset_index()
     
-    return aggregated, df
+    # Prepare distribution data
+    distribution_data = []
+    for loan_tenor in loan_tenors:
+        for ltv_ratio in ltv_ratios:
+            subset = df[(df['loan_tenor'] == loan_tenor) & (df['ltv_ratio'] == ltv_ratio)]
+            distribution_data.append({
+                'loan_tenor': loan_tenor,
+                'ltv_ratio': ltv_ratio,
+                'loss_values': subset['loss'].tolist()
+            })
+            
+    return aggregated, df, distribution_data
 
 def get_available_currencies():
     csv_files = [file for file in os.listdir() if file.endswith('.csv')]
@@ -70,28 +81,115 @@ def compute_trailing_volatility(price_series, window=30):
     volatility = returns.rolling(window).std() * (252 ** 0.5)  # Annualized volatility
     return volatility
 
-def plot_price_over_time(df, selected_from_date, selected_to_date):
+def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency):
     df_filtered = df[(df['snapped_at'] >= str(selected_from_date)) & (df['snapped_at'] <= str(selected_to_date))]
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 15), gridspec_kw={'height_ratios': [3, 1]})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
     ax1.fill_between(pd.to_datetime(df_filtered['snapped_at']), df_filtered['price'], color="skyblue", label='Price', alpha=0.5)
     ax1.plot(pd.to_datetime(df_filtered['snapped_at']), df_filtered['price'], color='blue')
-    ax1.set_title('Price Over Time', fontsize=22, fontweight="bold")
-    ax1.set_ylabel('Price', fontsize=20, fontweight="bold")
+    ax1.set_title('Price Over Time: {} / {}'.format(collateral_currency, loan_currency), fontsize=22, fontweight="bold")
+    ax1.set_ylabel('{} Price (in {})'.format(collateral_currency, loan_currency), fontsize=20, fontweight="bold")
     ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
     ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     ax1.tick_params(axis='both', which='major', labelsize=14)
+    
+    # Annotations and lines for high, low, and latest price on ax1 (Price plot)
+    highest_price = df_filtered['price'].max()
+    lowest_price = df_filtered['price'].min()
+    last_price = df_filtered['price'].iloc[-1]
 
+    # Check proximity for Price annotations
+    price_threshold = 0.05 * (highest_price - lowest_price)
+    annotate_high_price = True
+    annotate_low_price = True
+
+    if abs(highest_price - last_price) < price_threshold:
+        annotate_high_price = False
+    if abs(lowest_price - last_price) < price_threshold:
+        annotate_low_price = False
+
+    # Add Price annotations based on proximity
+    if annotate_high_price:
+        ax1.axhline(highest_price, color='green', linestyle='--', xmax=0.98)
+        ax1.annotate(f"Highest Price: {highest_price:.2f} {loan_currency}", 
+                     (1.01, highest_price), 
+                     xycoords=("axes fraction", "data"),
+                     textcoords="offset points",
+                     xytext=(15, 0),
+                     fontsize=15,
+                     color='green')
+    if annotate_low_price:
+        ax1.axhline(lowest_price, color='red', linestyle='--', xmax=0.98)
+        ax1.annotate(f"Lowest Price: {lowest_price:.2f} {loan_currency}", 
+                     (1.01, lowest_price), 
+                     xycoords=("axes fraction", "data"),
+                     textcoords="offset points",
+                     xytext=(15, 0),
+                     fontsize=15,
+                     color='red')
+    ax1.axhline(last_price, color='blue', linestyle='--', xmax=0.98)
+    ax1.annotate(f"Latest Price: {last_price:.2f} {loan_currency}", 
+                 (1.01, last_price), 
+                 xycoords=("axes fraction", "data"),
+                 textcoords="offset points",
+                 xytext=(15, 0),
+                 fontsize=15,
+                 color='blue')
+    
     # Calculate trailing volatility (e.g., 30-day rolling std deviation)
     df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
     df_filtered['volatility'] = df_filtered['log_returns'].rolling(window=30).std() * (365**0.5)
 
-    ax2.plot(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility'], color='red', label='Volatility')
-    ax2.fill_between(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility'], color="red", alpha=0.3)
-    ax2.set_title('Trailing 30-day Volatility', fontsize=20, fontweight="bold")
-    ax2.set_ylabel('Volatility', fontsize=18, fontweight="bold")
+    ax2.plot(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility']*100, color='red', label='Volatility')
+    ax2.fill_between(pd.to_datetime(df_filtered['snapped_at']), df_filtered['volatility']*100, color="red", alpha=0.3)
+    ax2.set_title('Annualized Volatility: {} / {} \n (Trailing 30-day)'.format(collateral_currency, loan_currency), fontsize=20, fontweight="bold")
+    ax2.set_ylabel('Volatility (in %)', fontsize=18, fontweight="bold")
     ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    # Annotations and lines for high, low, and latest volatility on ax2 (Volatility plot)
+    highest_volatility = df_filtered['volatility'].max()*100
+    lowest_volatility = df_filtered['volatility'].min()*100
+    last_volatility = df_filtered['volatility'].iloc[-1]*100
+
+    # Check proximity for Volatility annotations
+    volatility_threshold = 0.05 * (highest_volatility - lowest_volatility)
+    annotate_high_volatility = True
+    annotate_low_volatility = True
+
+    if abs(highest_volatility - last_volatility) < volatility_threshold:
+        annotate_high_volatility = False
+    if abs(lowest_volatility - last_volatility) < volatility_threshold:
+        annotate_low_volatility = False
+
+    # Add Volatility annotations based on proximity
+    if annotate_high_volatility:
+        ax2.axhline(highest_volatility, color='green', linestyle='--', xmax=0.98)
+        ax2.annotate(f"Highest Vol.: {highest_volatility:.2f}% p.a.", 
+                     (1.01, highest_volatility), 
+                     xycoords=("axes fraction", "data"),
+                     textcoords="offset points",
+                     xytext=(15, 0),
+                     fontsize=15,
+                     color='green')
+    if annotate_low_volatility:
+        ax2.axhline(lowest_volatility, color='red', linestyle='--', xmax=0.98)
+        ax2.annotate(f"Lowest Vol.: {lowest_volatility:.2f}% p.a.", 
+                     (1.01, lowest_volatility), 
+                     xycoords=("axes fraction", "data"),
+                     textcoords="offset points",
+                     xytext=(15, 0),
+                     fontsize=15,
+                     color='red')
+    ax2.axhline(last_volatility, color='blue', linestyle='--', xmax=0.98)
+    ax2.annotate(f"Latest Vol.: {last_volatility:.2f}% p.a.", 
+                 (1.01, last_volatility), 
+                 xycoords=("axes fraction", "data"),
+                 textcoords="offset points",
+                 xytext=(15, 0),
+                 fontsize=15,
+                 color='blue')
+    
     ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     ax2.tick_params(axis='both', which='major', labelsize=14)
@@ -102,29 +200,36 @@ def plot_price_over_time(df, selected_from_date, selected_to_date):
     return fig
 
 def plot_heatmap(aggregated, value_column, title, cmap='coolwarm', save_as=None):
-    # Convert the values to percentages for the heatmap
+    aggregated['ltv_ratio'] = (aggregated['ltv_ratio'] * 100).astype(int)
+    
+    # Create a pivot table for the heatmap
     heatmap_data = aggregated.pivot_table(index="ltv_ratio", columns="loan_tenor", values=value_column, aggfunc='mean') * 100
-
+    
+    # Calculate annotations with a % suffix
+    annotations = heatmap_data.applymap(lambda x: f"{int(x)}%")
+    
     plt.figure(figsize=(20, 15))
     ax = sns.heatmap(
         heatmap_data, 
-        annot=True, 
+        annot=annotations.values,  # Use the custom annotations
         cmap=cmap, 
         cbar_kws={'label': title + ' (%)'}, 
-        fmt='.1f', 
+        fmt='',  # No special format for annotations since they're already strings
         annot_kws={"size": 16, "weight": "bold"},  # Increase annotation font size and make it bold for readability
         linewidths=.5,  # Add lines between cells for clarity
         center=heatmap_data.mean().mean(),  # Center the colormap around the mean value
     )
+    plt.title(title, fontsize=20)
+    plt.show()
 
     # Update cbar (colorbar) label and ticks font size
     cbar = ax.collections[0].colorbar
     cbar.ax.tick_params(labelsize=14)
     cbar.set_label(title + ' (%)', size=18)
 
-    plt.title(title, fontsize=20, fontweight="bold")
-    plt.xlabel("Loan Tenor (days)", fontsize=18)
-    plt.ylabel("LTV Ratio (%)", fontsize=18)
+    plt.title("{}".format(title), fontsize=20, fontweight="bold")
+    plt.xlabel("Loan Tenor (in days)", fontsize=18, fontweight="bold")
+    plt.ylabel("LTV Ratio (in %)", fontsize=18, fontweight="bold")
     ax.invert_yaxis()  # To display the highest LTV ratio at the top
     ax.tick_params(axis='both', which='major', labelsize=14)  # Increase tick label size
     if save_as:
@@ -132,7 +237,7 @@ def plot_heatmap(aggregated, value_column, title, cmap='coolwarm', save_as=None)
     return plt
 
 def main():
-    st.title("Historical Backtesting")
+    st.title("Backtesting Period")
     
     # Sidebar for input selection
     with st.sidebar:
@@ -150,37 +255,39 @@ def main():
         max_date = pd.to_datetime(df['snapped_at'].max())
 
         selected_from_date, selected_to_date = st.date_input("Select Date Range", [min_date, max_date])
-        loan_tenors = st.multiselect("Select Tenors", [1,2,3,4,5,6,7,10,20,30,60,90,120,150,180,365], default=[30,60,90,120])
-        selected_ltv_ratios = st.multiselect("Select LTV Ratios", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99], default=[0.3, 0.4, 0.5, 0.6])
+        loan_tenors = st.multiselect("Select Tenors", [1,2,3,4,5,6,7,10,20,30,60,90,120,150,180,365], default=[30,60,90])
+        selected_ltv_ratios = st.multiselect("Select LTV Ratios", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99], default=[0.3, 0.4, 0.5])
         
         metric = st.selectbox(
             "Select Metric to Display",
-            ["90th Percentile Loss", "95th Percentile Loss", "99th Percentile Loss", "Worst Case Loss", "Average Loss", "Default Rate"]
+            ["VaR (95th Percentile Loss)", "VaR (90th Percentile Loss)", "VaR (99th Percentile Loss)", "VaR (Worst Case Loss)", "Average Loss", "Default Rate"]
         )
         
         metrics_map = {
-            "90th Percentile Loss": ("percentile_loss_90", "90th Percentile Losses"),
-            "95th Percentile Loss": ("percentile_loss_95", "95th Percentile Losses"),
-            "99th Percentile Loss": ("percentile_loss_99", "99th Percentile Losses"),
-            "Worst Case Loss": ("percentile_loss_worst", "Worst Case Losses"),
-            "Average Loss": ("average_loss", "Average Losses"),
-            "Default Rate": ("default_rate", "Default Rates")
+            "VaR (90th Percentile Loss)": ("percentile_loss_90", "VaR (90th Percentile Loss)"),
+            "VaR (95th Percentile Loss)": ("percentile_loss_95", "VaR (95th Percentile Loss)"),
+            "VaR (99th Percentile Loss)": ("percentile_loss_99", "VaR (99th Percentile Loss)"),
+            "VaR (Worst Case Loss)": ("percentile_loss_worst", "VaR (Worst Case Loss)"),
+            "Average Loss": ("average_loss", "Average Loss"),
+            "Default Rate": ("default_rate", "Default Rate")
         }
     
     # Read and process data
     df = read_and_process_data(collateral_currency, loan_currency)
         
     # Plot the time series at the top
-    time_series_fig = plot_price_over_time(df, selected_from_date, selected_to_date)
+    time_series_fig = plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency)
     st.pyplot(time_series_fig)
 
     column_name, title = metrics_map[metric]
     
-    aggregated, _ = simulate_default_and_loss_rate(df, 'price', loan_tenors, selected_ltv_ratios)
-    
-    st.write(f"Heatmap for {title} across Loan Tenors and LTVs for {collateral_currency} / {loan_currency}")
-    fig = plot_heatmap(aggregated, column_name, title, "Reds", None)
-    st.pyplot(fig)
+    aggregated, _, _ = simulate_default_and_loss_rate(df, 'price', loan_tenors, selected_ltv_ratios)
 
+    st.title(f"Lender Risk Analysis")
+
+    fig = plot_heatmap(aggregated, column_name, title, "Reds", None)
+    st.write(f"Heatmap illustrates your {title} across different tenor and LTV combinations. The {title} reflect a scenario where you randomly loaned {loan_currency} against {collateral_currency} collateral during the backtest period, with 0% APR and no upfront fees.")
+    st.pyplot(fig)  # Display the heatmap plot
+    
 if __name__ == "__main__":
     main()
