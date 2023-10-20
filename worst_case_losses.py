@@ -6,30 +6,39 @@ import os
 import matplotlib.dates as mdates
 import numpy as np
 
-def compute_loss_and_default(start_index, price_column_name, loan_tenor, initial_loan_value, df):
+def compute_loss_and_default(start_index, price_column_name, loan_tenor, initial_loan_value, upfront_fee, APR, df):
     if start_index + loan_tenor >= len(df):
-        return None, None
+        return None, None, None, None
     end_price = df.iloc[start_index + loan_tenor][price_column_name]
-    defaulted = end_price < initial_loan_value
-    loss = (1 - end_price / initial_loan_value) if defaulted else 0
-    return defaulted, loss
+    
+    repayment_amount = initial_loan_value * (1 + APR * loan_tenor / 365)
+    upfront_fee_amount = upfront_fee * end_price
+    
+    defaulted = end_price * (1 - upfront_fee) < repayment_amount
+    loss = (1 - end_price / initial_loan_value) if end_price < initial_loan_value else 0
+    apy_from_interest_given_no_default = 0 if defaulted else APR
+    apy_from_upfront_given_no_default = upfront_fee_amount / initial_loan_value * 365 / loan_tenor
 
-def simulate_default_and_loss_rate(merged_df, price_column_name, loan_tenors, ltv_ratios):
+    return defaulted, loss, apy_from_interest_given_no_default, apy_from_upfront_given_no_default
+
+def simulate_default_and_loss_rate(merged_df, price_column_name, loan_tenors, ltv_ratios, upfront_fee, APR):
     results = []
     for i, row in merged_df.iterrows():
         for loan_tenor in loan_tenors:
             for ltv_ratio in ltv_ratios:
                 loan_value = row[price_column_name] * ltv_ratio
-                defaulted, loss = compute_loss_and_default(i, price_column_name, loan_tenor, loan_value, merged_df)
+                defaulted, loss, apy_from_interest_given_no_default, apy_from_upfront_given_no_default = compute_loss_and_default(i, price_column_name, loan_tenor, loan_value, upfront_fee, APR, merged_df)
                 if defaulted is not None:
                     results.append({
                         'start_date': row['snapped_at'],
                         'loan_tenor': loan_tenor,
                         'ltv_ratio': ltv_ratio,
                         'defaulted': defaulted,
-                        'loss': loss
+                        'loss': loss,
+                        'apy_from_interest_given_no_default': apy_from_interest_given_no_default,
+                        'apy_from_upfront_given_no_default': apy_from_upfront_given_no_default,
+                        'pnl_total': apy_from_interest_given_no_default + apy_from_upfront_given_no_default - loss
                     })
-
     df = pd.DataFrame(results)
     aggregated = df.groupby(['ltv_ratio', 'loan_tenor']).agg(
         start_date=('start_date', 'first'),
@@ -40,21 +49,19 @@ def simulate_default_and_loss_rate(merged_df, price_column_name, loan_tenors, lt
         percentile_loss_99=('loss', lambda x: x.quantile(0.99)),
         percentile_loss_worst=('loss', lambda x: x.max()),
         observation_count=('defaulted', 'size'),
-        loss_stddev=('loss', 'std')
+        pnl_mean=('pnl_total', 'mean'),
+        pnl_median=('pnl_total', 'median')
     ).reset_index()
-    
-    # Prepare distribution data
-    distribution_data = []
-    for loan_tenor in loan_tenors:
-        for ltv_ratio in ltv_ratios:
-            subset = df[(df['loan_tenor'] == loan_tenor) & (df['ltv_ratio'] == ltv_ratio)]
-            distribution_data.append({
-                'loan_tenor': loan_tenor,
-                'ltv_ratio': ltv_ratio,
-                'loss_values': subset['loss'].tolist()
-            })
             
-    return aggregated, df, distribution_data
+    # Calculate PnL percentiles for each LTV and tenor combination
+    for ltv_ratio in ltv_ratios:
+        for loan_tenor in loan_tenors:
+            sub_df = df[(df['ltv_ratio'] == ltv_ratio) & (df['loan_tenor'] == loan_tenor)]
+            for p in np.arange(0, 1.05, 0.05):
+                percentile_pnl = sub_df['pnl_total'].quantile(p)
+                aggregated.loc[(aggregated['ltv_ratio'] == ltv_ratio) & (aggregated['loan_tenor'] == loan_tenor), f'percentile_pnl_{int(p*100)}'] = percentile_pnl
+    print(aggregated)
+    return aggregated, df
 
 def get_available_currencies():
     csv_files = [file for file in os.listdir() if file.endswith('.csv')]
@@ -258,6 +265,13 @@ def main():
         loan_tenors = st.multiselect("Select Tenors", [1,2,3,4,5,6,7,10,20,30,60,90,120,150,180,365], default=[30,60,90])
         selected_ltv_ratios = st.multiselect("Select LTV Ratios", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99], default=[0.3, 0.4, 0.5])
         
+        APR = st.number_input("Enter Annual Percentage Rate (APR) in percentage:", min_value=0.0, max_value=500.0, value=5.0)
+        upfront_fee = st.number_input("Enter Upfront Fee in percentage:", min_value=0.0, max_value=100.0, value=0.0)
+        
+        # Convert percentage to proportions for calculations
+        APR /= 100.0
+        upfront_fee /= 100.0
+
         metric = st.selectbox(
             "Select Metric to Display",
             ["VaR (95th Percentile Loss)", "VaR (90th Percentile Loss)", "VaR (99th Percentile Loss)", "VaR (Worst Case Loss)", "Average Loss", "Default Rate"]
@@ -281,13 +295,53 @@ def main():
 
     column_name, title = metrics_map[metric]
     
-    aggregated, _, _ = simulate_default_and_loss_rate(df, 'price', loan_tenors, selected_ltv_ratios)
+    aggregated, _ = simulate_default_and_loss_rate(df, 'price', loan_tenors, selected_ltv_ratios, upfront_fee, APR)
 
     st.title(f"Lender Risk Analysis")
 
     fig = plot_heatmap(aggregated, column_name, title, "Reds", None)
-    st.write(f"Heatmap illustrates your {title} across different tenor and LTV combinations. The {title} reflect a scenario where you randomly loaned {loan_currency} against {collateral_currency} collateral during the backtest period, with 0% APR and no upfront fees.")
-    st.pyplot(fig)  # Display the heatmap plot
-    
+    st.write(f"Heatmap illustrates your {title} across different tenor and LTV combinations. The {title} figures below are for a scenario where you would've randomly loaned {loan_currency} against {collateral_currency} collateral during the backtest period and borrower default would've ocurred if the collateral price would've been worth less then the debt owed.")
+    st.pyplot(fig)
+
+
+    st.title(f"Lender PnL Analysis")
+    st.write(f"Illustration of the Lender's PnL distribution across various tenor and LTV scenarios. The backtest assumes that a borrower will consistently choose to borrow from you at the specified APR and upfront fee. When inputting your intended APR and fee, make sure they are realistic: they should provide adequate compensation for the risks you bear while being competitive enough to attract borrowers.")
+
+    # Set the aesthetic style of the plots
+    sns.set_style("whitegrid")
+
+    # Extract unique LTV ratios and unique tenors
+    ltv_ratios = sorted(aggregated['ltv_ratio'].unique(), reverse=True)
+    tenors = sorted(aggregated['loan_tenor'].unique())
+
+    fig, axes = plt.subplots(len(ltv_ratios), len(tenors), figsize=(11, 4 * len(ltv_ratios)))
+
+    for row, ltv in enumerate(ltv_ratios):
+        for col, tenor in enumerate(tenors):
+            # Filter dataframe by LTV ratio and tenor
+            data_row = aggregated[(aggregated['ltv_ratio'] == ltv) & (aggregated['loan_tenor'] == tenor)]
+
+            if not data_row.empty:
+                pnl_values = [data_row.iloc[0][f'percentile_pnl_{p}'] for p in np.arange(0, 101, 5)]
+
+                ax = axes[row][col]
+
+                # Plotting the area plot with conditional coloring
+                ax.plot(np.arange(0, 101, 5), pnl_values, color='black')  # drawing the main curve
+                ax.fill_between(np.arange(0, 101, 5), pnl_values, where=[val > 0 for val in pnl_values], color='lightgreen')
+                ax.fill_between(np.arange(0, 101, 5), pnl_values, where=[val < 0 for val in pnl_values], color='lightcoral')
+
+                # Adding median and mean PnL horizontal lines
+                ax.axhline(data_row.iloc[0]['percentile_pnl_50'], color='blue', linestyle='--', label='Median PnL')
+                ax.axhline(np.mean(pnl_values), color='red', linestyle='-.', label='Mean PnL')
+
+                ax.set_title(f"{ltv}% LTV - {tenor} days")
+                ax.set_ylabel("PnL (annualized)")
+                ax.set_xlabel("Percentile")
+                ax.legend(loc='upper left')
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
 if __name__ == "__main__":
     main()
