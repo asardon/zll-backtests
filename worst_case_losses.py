@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 import matplotlib.dates as mdates
 import numpy as np
+import matplotlib.ticker as ticker
 
 def compute_loss_and_default(start_index, price_column_name, loan_tenor, initial_loan_value, upfront_fee, APR, df):
     if start_index + loan_tenor >= len(df):
@@ -88,6 +89,16 @@ def compute_trailing_volatility(price_series, window=30):
     volatility = returns.rolling(window).std() * (252 ** 0.5)  # Annualized volatility
     return volatility
 
+def format_two_significant_digits(num, _=None):
+    if num == 0:
+        return "0.00"
+    magnitude = int(np.floor(np.log10(abs(num))))
+    if magnitude >= 1:
+        return f"{num:.2f}"
+    else:
+        format_str = "{:." + str(2 - magnitude) + "f}"
+        return format_str.format(num)
+
 def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency):
     df_filtered = df[(df['snapped_at'] >= str(selected_from_date)) & (df['snapped_at'] <= str(selected_to_date))]
     
@@ -99,6 +110,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
     ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
     ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax1.yaxis.set_major_formatter(ticker.FuncFormatter(format_two_significant_digits))
     ax1.tick_params(axis='both', which='major', labelsize=14)
     
     # Annotations and lines for high, low, and latest price on ax1 (Price plot)
@@ -119,16 +131,16 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
     # Add Price annotations based on proximity
     if annotate_high_price:
         ax1.axhline(highest_price, color='green', linestyle='--', xmax=0.98)
-        ax1.annotate(f"Highest Price: {highest_price:.2f} {loan_currency}", 
-                     (1.01, highest_price), 
-                     xycoords=("axes fraction", "data"),
-                     textcoords="offset points",
-                     xytext=(15, 0),
-                     fontsize=15,
-                     color='green')
+        ax1.annotate(f"Highest Price: {format_two_significant_digits(highest_price)} {loan_currency}", 
+             (1.01, highest_price), 
+             xycoords=("axes fraction", "data"),
+             textcoords="offset points",
+             xytext=(15, 0),
+             fontsize=15,
+             color='green')
     if annotate_low_price:
         ax1.axhline(lowest_price, color='red', linestyle='--', xmax=0.98)
-        ax1.annotate(f"Lowest Price: {lowest_price:.2f} {loan_currency}", 
+        ax1.annotate(f"Lowest Price: {format_two_significant_digits(lowest_price)} {loan_currency}",
                      (1.01, lowest_price), 
                      xycoords=("axes fraction", "data"),
                      textcoords="offset points",
@@ -136,7 +148,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
                      fontsize=15,
                      color='red')
     ax1.axhline(last_price, color='blue', linestyle='--', xmax=0.98)
-    ax1.annotate(f"Latest Price: {last_price:.2f} {loan_currency}", 
+    ax1.annotate(f"Latest Price: {format_two_significant_digits(last_price)} {loan_currency}",
                  (1.01, last_price), 
                  xycoords=("axes fraction", "data"),
                  textcoords="offset points",
@@ -263,7 +275,7 @@ def main():
 
         selected_from_date, selected_to_date = st.date_input("Select Date Range", [min_date, max_date])
         loan_tenors = st.multiselect("Select Tenors", [1,2,3,4,5,6,7,10,20,30,60,90,120,150,180,365], default=[30,60,90])
-        selected_ltv_ratios = st.multiselect("Select LTV Ratios", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99], default=[0.3, 0.4, 0.5])
+        selected_ltv_ratios = st.multiselect("Select LTV Ratios", np.around(np.append(np.arange(0.05, 1, 0.05), 0.99), 2), default=[0.3, 0.4, 0.5])
         
         APR = st.number_input("Enter Annual Percentage Rate (APR) in percentage:", min_value=0.0, max_value=500.0, value=5.0)
         upfront_fee = st.number_input("Enter Upfront Fee in percentage:", min_value=0.0, max_value=100.0, value=0.0)
@@ -304,8 +316,8 @@ def main():
     st.pyplot(fig)
 
 
-    st.title(f"Lender PnL Analysis")
-    st.write(f"Illustration of the Lender's PnL distribution across various tenor and LTV scenarios. The backtest assumes that a borrower will consistently choose to borrow from you at the specified APR and upfront fee. When inputting your intended APR and fee, make sure they are realistic: they should provide adequate compensation for the risks you bear while being competitive enough to attract borrowers.")
+    st.title(f"Lender APY Analysis")
+    st.write(f"Illustration of the Lender's APY distribution across various tenor and LTV scenarios. The backtest assumes that a borrower will consistently choose to borrow from you at the specified APR and upfront fee. When inputting your intended APR and fee, make sure they are realistic: they should provide adequate compensation for the risks you bear while being competitive enough to attract borrowers.")
 
     # Set the aesthetic style of the plots
     sns.set_style("whitegrid")
@@ -336,7 +348,7 @@ def main():
                 ax.axhline(np.mean(pnl_values), color='red', linestyle='-.', label='Mean PnL')
 
                 ax.set_title(f"{ltv}% LTV - {tenor} days")
-                ax.set_ylabel("PnL (annualized)")
+                ax.set_ylabel("APY")
                 ax.set_xlabel("Percentile")
                 ax.legend(loc='upper left')
 
