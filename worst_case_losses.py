@@ -82,14 +82,14 @@ def read_and_process_data(collateral_currency, loan_currency):
         df2['snapped_at_datetime'] = pd.to_datetime(df2['snapped_at'])
         df = df1.merge(df2, on='snapped_at_datetime', suffixes=('_coll', '_loan'))
         df['price'] = df['price_coll'] / df['price_loan']  # Cross price
+
+    tmp_1_df = pd.read_csv(collateral_currency.lower() + '.csv', sep=",")
+    tmp_2_df = pd.read_csv('eth.csv', sep=",")
+    df['price_coll_vs_usd'] = tmp_1_df['price']
+    df['price_eth_vs_usd'] = tmp_2_df['price']
+
     df.sort_values(by='snapped_at_datetime', ascending=True, inplace=True)
     return df
-
-def compute_trailing_volatility(price_series, window=30):
-    """Compute the trailing volatility of returns for a given price series."""
-    returns = price_series.pct_change().dropna()
-    volatility = returns.rolling(window).std() * (252 ** 0.5)  # Annualized volatility
-    return volatility
 
 def format_two_significant_digits(num, _=None):
     if num == 0:
@@ -110,7 +110,7 @@ def count_formatter(x, pos):
 def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency):
     df_filtered = df[(df['snapped_at_datetime'] >= pd.to_datetime(selected_from_date).tz_localize('UTC')) & (df['snapped_at_datetime'] <= pd.to_datetime(selected_to_date).tz_localize('UTC'))]
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={'height_ratios': [3, 1]})
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(16, 20), gridspec_kw={'height_ratios': [3, 1, 1, 1]})
     ax1.fill_between(pd.to_datetime(df_filtered['snapped_at_datetime']), df_filtered['price'], color="skyblue", label='Price', alpha=0.5)
     ax1.plot(pd.to_datetime(df_filtered['snapped_at_datetime']), df_filtered['price'], color='blue')
     ax1.set_title('Price Over Time: {}/{}'.format(collateral_currency, loan_currency), fontsize=22, fontweight="bold")
@@ -170,7 +170,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
 
     ax2.plot(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color='red', label='Volatility')
     ax2.fill_between(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color="red", alpha=0.3)
-    ax2.set_title('Annualized Volatility: {}/{} \n (Trailing 30-day)'.format(collateral_currency, loan_currency), fontsize=20, fontweight="bold")
+    ax2.set_title('Annualized Volatility: {} vs {} \n (30-Day Rolling Window)'.format(collateral_currency, loan_currency), fontsize=20, fontweight="bold")
     ax2.set_ylabel('Volatility (in %)', fontsize=18, fontweight="bold")
     ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
 
@@ -216,10 +216,52 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
                  xytext=(15, 0),
                  fontsize=15,
                  color='blue')
+
+    # Calculate log returns for both the underlying and ETH prices
+    df_filtered['underlying_log_returns'] = np.log(df_filtered['price_coll_vs_usd'] / df_filtered['price_coll_vs_usd'].shift(1))
+    df_filtered['eth_log_returns'] = np.log(df_filtered['price_eth_vs_usd'] / df_filtered['price_eth_vs_usd'].shift(1))
+    # Drop any NaN values that may have been introduced by our log return calculation
+    df_filtered = df_filtered.dropna()
+    # Calculate a 30-day rolling correlation
+    window_size = 60  # The window size can be adjusted depending on the data frequency and needs
+    df_filtered['rolling_correlation'] = df_filtered['underlying_log_returns'].rolling(window=window_size).corr(df_filtered['eth_log_returns'])
+    # Calculate rolling covariance between the underlying asset and ETH
+    rolling_covariance = df_filtered['underlying_log_returns'].rolling(window=window_size).cov(df_filtered['eth_log_returns'])
+
+    # Calculate rolling variance for ETH
+    rolling_variance = df_filtered['eth_log_returns'].rolling(window=window_size).var()
+
+    # Calculate rolling beta for the underlying asset (beta = covariance / variance)
+    df_filtered['rolling_beta'] = rolling_covariance / rolling_variance
+
+    # Add rolling correlation to the third axis (ax3)
+    ax3.plot(df_filtered['snapped_at_datetime'], df_filtered['rolling_correlation'], label='30-day Rolling Correlation', color='purple')
+    ax3.set_title(f'Correlation: {collateral_currency} vs ETH\n(30-Day Rolling Window)', fontsize=20, fontweight='bold')
+    ax3.set_ylabel('Rolling Correlation', fontsize=18, fontweight='bold')
+    ax3.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax3.axhline(0, color='black', linewidth=0.5, linestyle='--')  # Add a horizontal line at correlation 0 for reference
+    ax3.fill_between(df_filtered['snapped_at_datetime'], df_filtered['rolling_correlation'], 0, 
+                    where=df_filtered['rolling_correlation'] > 0, color='green', alpha=0.3,
+                    interpolate=True)
+    ax3.fill_between(df_filtered['snapped_at_datetime'], df_filtered['rolling_correlation'], 0, 
+                    where=df_filtered['rolling_correlation'] < 0, color='red', alpha=0.3,
+                    interpolate=True)
     
-    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax4.plot(df_filtered['snapped_at_datetime'], df_filtered['rolling_beta'], label='30-day Rolling Beta', color='purple')
+    ax4.set_title(f'Beta: {collateral_currency} vs ETH\n(30-Day Rolling Window)', fontsize=20, fontweight='bold')
+    ax4.set_ylabel('Rolling Beta', fontsize=18, fontweight='bold')
+    ax4.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax4.axhline(1, color='black', linewidth=0.5, linestyle='--')  # Beta of 1 line for reference
+    ax4.axhline(0, color='black', linewidth=0.5, linestyle='--')  # Beta of 0 line for reference
+    margin = 0.1 * (df_filtered['rolling_beta'].max() - df_filtered['rolling_beta'].min())
+    y_min = df_filtered['rolling_beta'].min() - margin
+    y_max = df_filtered['rolling_beta'].max() + margin
+    ax4.set_ylim(y_min, y_max)
+    
+    ax4.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax4.tick_params(axis='both', which='major', labelsize=14)
+
 
     fig.tight_layout()
     fig.autofmt_xdate()
