@@ -7,6 +7,104 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as ticker
+from scipy.stats import norm
+
+def black_scholes_call(S, K, t, r, sigma):
+    t = t / 365.
+
+    # Calculate d1 and d2 parameters
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * t) / (sigma * np.sqrt(t))
+    d2 = d1 - sigma * np.sqrt(t)
+
+    # Calculate call option price
+    if t > 0:
+        delta = norm.cdf(d1)
+        call_price = (S * delta - K * np.exp(-r * t) * norm.cdf(d2))
+    else:
+        delta = 1. if S > K else 0.
+        call_price = S - K if S > K else 0.
+    return call_price, delta
+
+def simulate_hedging(results_df, upfront_fee, loan_tenor, risk_free_rate, spread=.0, trading_fee=.0):
+    # Pre-allocate memory for new columns
+    hedge_results = pd.DataFrame(index=results_df.index)
+    columns = ['unclaimed_collateral', 'delta_hedge_inventory',
+               'final_collateral_position', 'hedge_cumulative_pnl', 'hedge_unwind_pnl',
+               'final_hedged_pnl', 'final_hedged_pnl_with_repayment_and_upfront_fee',
+               'final_unhedged_pnl_with_repayment_and_upfront_fee', 'delta_min', 'delta_max', 'delta_median', 'delta_25_percentile', 'delta_75_percentile']
+    for col in columns:
+        hedge_results[col] = np.nan
+
+    # Assuming results_df is already populated with the necessary columns
+    # including 'price', 'volatility', and 'repayment_amounts'
+    for i, from_row in results_df.iterrows():
+        K = from_row['repayment_amount'] / (1 - upfront_fee)  # Strike price
+        
+        # Initialize variables for tracking the hedge
+        delta_hedge_inventory = 0  # How much of the underlying we currently hold
+        cumulative_hedge_pnl = 0  # Total cost spent on hedging
+        
+        delta_values = []
+
+        # Iterate over the subsequent rows starting from the current index `i`
+        # Only consider rows up to the loan tenure
+        for j in range(i, i + loan_tenor):
+            if j >= len(results_df):
+                break  # If j exceeds the number of rows, break the loop
+            
+            to_row = results_df.iloc[j]
+            S = to_row['price']  # Starting price of the underlying
+            t = loan_tenor - (j - i)
+            
+            # Calculate call price and delta for the day
+            _, delta = black_scholes_call(S, K, t, risk_free_rate, to_row['volatility'])
+            
+            covered_call_delta = 1 - delta
+            
+            # Calculate the hedge adjustment needed (delta_hedge_inventory is negative for short positions)
+            delta_exposure = covered_call_delta + delta_hedge_inventory
+            delta_values.append(covered_call_delta)
+            if abs(delta_exposure) > 0:
+                # Update inventory and calculate the cost of the hedge adjustment
+                if delta_exposure > 0:
+                    # sell underlying
+                    amount_to_short = delta_exposure
+                    hedge_pnl = amount_to_short * S * (1 - spread - trading_fee) # selling is profit (record as negative value)
+                    delta_hedge_inventory -= amount_to_short
+                else:
+                    # buy underlying
+                    amount_to_buy = abs(delta_exposure)
+                    hedge_pnl = -amount_to_buy * S * (1 + spread + trading_fee) # buying is cost (record as positive value)
+                    delta_hedge_inventory += amount_to_buy
+                cumulative_hedge_pnl += hedge_pnl
+            # Update the underlying price for the next simulation step if needed
+            # This would involve moving S to the next price in the price path
+
+        borrower_repays = from_row['price_at_expiry'] * (1 - upfront_fee) > from_row['repayment_amount']
+        # Final amounts
+        unclaimed_collateral = 0. if borrower_repays else 1.
+        final_collateral_position = unclaimed_collateral + delta_hedge_inventory
+        # Finally unwind hedge
+        hedge_unwind_pnl = final_collateral_position * from_row['price_at_expiry'] * (1 - spread - trading_fee) if final_collateral_position > 0 else final_collateral_position * from_row['price_at_expiry'] * (1 + spread + trading_fee)
+
+        # Record the results in the DataFrame
+        hedge_results.loc[i, 'delta_min'] = np.min(delta_values)
+        hedge_results.loc[i, 'delta_max'] = np.max(delta_values)
+        hedge_results.loc[i, 'delta_median'] = np.median(delta_values)
+        hedge_results.loc[i, 'delta_25_percentile'] = np.percentile(delta_values, 25)
+        hedge_results.loc[i, 'delta_75_percentile'] = np.percentile(delta_values, 75)
+        hedge_results.loc[i, 'unclaimed_collateral'] = unclaimed_collateral
+        hedge_results.loc[i, 'delta_hedge_inventory'] = delta_hedge_inventory
+        hedge_results.loc[i, 'final_collateral_position'] = final_collateral_position
+        hedge_results.loc[i, 'hedge_cumulative_pnl'] = cumulative_hedge_pnl
+        hedge_results.loc[i, 'hedge_unwind_pnl'] = hedge_unwind_pnl
+        hedge_results.loc[i, 'final_hedged_pnl'] = hedge_unwind_pnl + cumulative_hedge_pnl 
+        hedge_results.loc[i, 'final_hedged_pnl_with_repayment_and_upfront_fee'] = hedge_unwind_pnl + cumulative_hedge_pnl + (from_row['repayment_amount'] if borrower_repays else 0.) - from_row['loan_per_coll'] + upfront_fee * from_row['price']
+        hedge_results.loc[i, 'final_unhedged_pnl_with_repayment_and_upfront_fee'] = (from_row['repayment_amount'] if borrower_repays else unclaimed_collateral * from_row['price_at_expiry']) - from_row['loan_per_coll'] + upfront_fee * from_row['price']
+
+    # Combine the hedge results with the results_df
+    final_results = pd.concat([results_df, hedge_results], axis=1)
+    return final_results
 
 def simulate_strategy(df, price_column_name, loan_tenor, ltv_ratio, upfront_fee, APR):
     # Create a copy of the DataFrame to ensure the original DataFrame is not modified
@@ -51,6 +149,8 @@ def simulate_strategy(df, price_column_name, loan_tenor, ltv_ratio, upfront_fee,
         'price': start_prices,
         'price_at_expiry': end_prices,
         'loan_per_coll': loan_values,
+        'repayment_amount': repayment_amounts,
+        'volatility': df_copy.loc[valid_indices, 'volatility'],
         'loan_inception_time': df_copy.loc[valid_indices, 'snapped_at_datetime'],
         'loan_expiry_time': df_copy.loc[valid_indices, 'snapped_at_datetime'] + pd.Timedelta(days=loan_tenor),
         'defaulted': defaulted,
@@ -166,11 +266,12 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
     
     # Calculate trailing volatility (e.g., 30-day rolling std deviation)
     df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
-    df_filtered['volatility'] = df_filtered['log_returns'].rolling(window=30).std() * (365**0.5)
-
+    span = 90
+    df_filtered['volatility'] = df_filtered['log_returns'].ewm(span=span).std() * (365**0.5)
+    df_filtered.to_csv('awdawdwa.csv')
     ax2.plot(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color='red', label='Volatility')
     ax2.fill_between(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color="red", alpha=0.3)
-    ax2.set_title('Annualized Volatility: {} vs {} \n (30-Day Rolling Window)'.format(collateral_currency, loan_currency), fontsize=20, fontweight="bold")
+    ax2.set_title('Annualized Volatility: {} vs {} \n ({}-Day EWM Rolling Window)'.format(collateral_currency, loan_currency, span), fontsize=20, fontweight="bold")
     ax2.set_ylabel('Volatility (in %)', fontsize=18, fontweight="bold")
     ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
 
@@ -569,6 +670,31 @@ def main():
     else:
         st.write("Please select values for LTV and Tenor.")
 
+
+    # Button to generate plot
+    st.write(f"## Covered Call Delta Simulation**")
+    if st.button('Simulate Delta Distribution'):
+        tmp = simulate_hedging(results_df, upfront_fee_detailed, tenor_detailed, risk_free_rate=0.0, spread=0.0, trading_fee=0.0)
+
+        plt.figure(figsize=(14, 7))
+        plt.style.use('seaborn-darkgrid')
+
+        # Representing min, max, and median as points
+        plt.scatter(tmp['loan_inception_time'], tmp['delta_min'], label='Min. Delta', color='blue', marker='o')
+        plt.scatter(tmp['loan_inception_time'], tmp['delta_max'], label='Max. Delta', color='red', marker='^')
+        plt.scatter(tmp['loan_inception_time'], tmp['delta_median'], label='Median Delta', color='green', marker='s')
+
+        # Fill between 25th and 75th percentile
+        plt.fill_between(tmp['loan_inception_time'], tmp['delta_25_percentile'], tmp['delta_75_percentile'], color='gray', alpha=0.2, label='25th-75th Percentile Range')
+
+        plt.xlabel('Loan Inception Time', fontsize=14)
+        plt.ylabel('Delta Value', fontsize=14)
+        plt.title('Distribution of Deltas Across Time', fontsize=16)
+        plt.legend(fontsize=12, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=4)
+        plt.grid(True)
+        plt.tight_layout()
+
+        st.pyplot(plt)
 
 if __name__ == "__main__":
     main()
