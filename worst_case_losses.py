@@ -8,6 +8,29 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as ticker
 from scipy.stats import norm
+import requests
+from datetime import datetime, timedelta
+
+@st.cache_data
+def get_tokens():
+    url = "https://api.coingecko.com/api/v3/coins/list"
+    response = requests.get(url)
+    data = response.json()
+    return [coin['id'] for coin in data if 'id' in coin]
+
+@st.cache_data
+def get_historical_data_cg(token_id, vs_currency, date_from, date_to):
+    url = f"https://api.coingecko.com/api/v3/coins/{token_id}/market_chart/range"
+    params = {
+        'vs_currency': vs_currency,
+        'from': date_from.timestamp(),
+        'to': date_to.timestamp()
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    prices = pd.DataFrame(data['prices'], columns=['timestamp', 'price'])
+    prices['timestamp'] = pd.to_datetime(prices['timestamp'], unit='ms')
+    return prices
 
 def black_scholes_call(S, K, t, r, sigma):
     t = t / 365.
@@ -166,29 +189,42 @@ def get_available_currencies():
     csv_files = [file for file in os.listdir() if file.endswith('.csv')]
     return [file.split('.')[0].upper() for file in csv_files]
 
-def read_and_process_data(collateral_currency, loan_currency):
-    if loan_currency == 'USD':
-        df = pd.read_csv(collateral_currency.lower() + '.csv', sep=",")
-        df['price'] = df['price']  # Explicit assignment, may be unnecessary
-        df['snapped_at_datetime'] = pd.to_datetime(df['snapped_at'])
-    elif collateral_currency == 'USD':
-        df = pd.read_csv(loan_currency.lower() + '.csv', sep=",")
-        df['price'] = 1 / df['price']  # Reciprocal
-        df['snapped_at_datetime'] = pd.to_datetime(df['snapped_at'])
-    else:
-        df1 = pd.read_csv(collateral_currency.lower() + '.csv', sep=",")
-        df2 = pd.read_csv(loan_currency.lower() + '.csv', sep=",")
-        df1['snapped_at_datetime'] = pd.to_datetime(df1['snapped_at'])
-        df2['snapped_at_datetime'] = pd.to_datetime(df2['snapped_at'])
-        df = df1.merge(df2, on='snapped_at_datetime', suffixes=('_coll', '_loan'))
-        df['price'] = df['price_coll'] / df['price_loan']  # Cross price
+def read_and_process_data(collateral_currency, loan_currency, selected_from_date, selected_to_date):
+    # Define your date range here
+    date_from = pd.to_datetime(selected_from_date)  # Start date
+    date_to = pd.to_datetime(selected_to_date)      # End date
 
-    tmp_1_df = pd.read_csv(collateral_currency.lower() + '.csv', sep=",")
-    tmp_2_df = pd.read_csv('eth.csv', sep=",")
-    df['price_coll_vs_usd'] = tmp_1_df['price']
-    df['price_eth_vs_usd'] = tmp_2_df['price']
+    # Logic to handle different cases (collateral vs. loan currency)
+    if loan_currency == 'USD' and collateral_currency != 'USD':
+        df_collateral = get_historical_data_cg(collateral_currency, 'usd', date_from, date_to)
+        df = df_collateral
+        df['price_loan'] = df_collateral['price'] * 0 + 1.
+        df['price_coll'] = df_collateral['price']
+    
+    if collateral_currency == 'USD' and loan_currency != 'USD':
+        df_loan = get_historical_data_cg(loan_currency, 'usd', date_from, date_to)
+        df = df_loan
+        df['price_loan'] = 1 / df_loan['price']  # Reciprocal for USD loan
+        df['price_coll'] = df_loan['price'] * 0 + 1.
+    
+    if collateral_currency != 'USD' and loan_currency != 'USD':
+        df_collateral = get_historical_data_cg(collateral_currency, 'usd', date_from, date_to)
+        df_loan = get_historical_data_cg(loan_currency, 'usd', date_from, date_to)
 
-    df.sort_values(by='snapped_at_datetime', ascending=True, inplace=True)
+        df = df_collateral.merge(df_loan, on='timestamp', suffixes=('_coll', '_loan'))
+
+        df['price_loan'] = df['price_coll'] 
+        df['price_coll'] = df_collateral['price_loan']
+
+    df['price_coll_vs_usd'] = df_collateral['price']
+
+    df_eth = get_historical_data_cg('ethereum', 'usd', date_from, date_to)
+    df = df.merge(df_eth, on='timestamp', suffixes=('_eth', '_non_eth'))
+    df['price_eth_vs_usd'] = df_eth['price']
+
+    df['price'] = df['price_coll'] / df['price_loan']  # Cross price
+
+    df['snapped_at_datetime'] = pd.to_datetime(df['timestamp'])
     return df
 
 def format_two_significant_digits(num, _=None):
@@ -208,7 +244,7 @@ def count_formatter(x, pos):
     return f"{int(x):,}"
 
 def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency):
-    df_filtered = df[(df['snapped_at_datetime'] >= pd.to_datetime(selected_from_date).tz_localize('UTC')) & (df['snapped_at_datetime'] <= pd.to_datetime(selected_to_date).tz_localize('UTC'))]
+    df_filtered = df[(df['snapped_at_datetime'] >= pd.to_datetime(selected_from_date)) & (df['snapped_at_datetime'] <= pd.to_datetime(selected_to_date))]
     
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(16, 20), gridspec_kw={'height_ratios': [3, 1, 1, 1]})
     ax1.fill_between(pd.to_datetime(df_filtered['snapped_at_datetime']), df_filtered['price'], color="skyblue", label='Price', alpha=0.5)
@@ -333,7 +369,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
     rolling_variance = df_filtered['eth_log_returns'].rolling(window=window_size).var()
 
     # Calculate rolling beta for the underlying asset (beta = covariance / variance)
-    df_filtered['rolling_beta'] = rolling_covariance / rolling_variance
+    df_filtered['rolling_beta'] = (rolling_covariance / rolling_variance).round(2)
 
     # Add rolling correlation to the third axis (ax3)
     ax3.plot(df_filtered['snapped_at_datetime'], df_filtered['rolling_correlation'], label='30-day Rolling Correlation', color='purple')
@@ -371,32 +407,34 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
 
 def main():    
     # Sidebar for input selection
+    currencies = ['USD'] + get_tokens()
     with st.sidebar:
-        currencies = ['USD'] + get_available_currencies()
-        
         with st.expander("**Asset Pair**", expanded=True):
-            collateral_currency = st.selectbox("Select Collateral Token", currencies, index=currencies.index('RPL'))
+            # Check if 'RPL' and 'USD' are in the list
+            default_collateral_index = currencies.index("ethereum") if "ethereum" in currencies else 0
+            default_loan_index = currencies.index('USD') if 'USD' in currencies else 0
+
+            collateral_currency = st.selectbox("Select Collateral Token", currencies, index=default_collateral_index)
             loan_currencies = [currency for currency in currencies if currency != collateral_currency]
-            loan_currency = st.selectbox("Select Loan Token", loan_currencies, index=currencies.index('USD'))
+            loan_currency = st.selectbox("Select Loan Token", loan_currencies, index=default_loan_index)
+            
+            today = datetime.today()
+            two_years_ago = today - timedelta(days=730)
+            
+            selected_from_date, selected_to_date = st.date_input("Select Date Range", [two_years_ago, today])
 
-        df = read_and_process_data(collateral_currency, loan_currency)
+            df = read_and_process_data(collateral_currency, loan_currency, selected_from_date, selected_to_date)
 
-        # Set the min and max date from the dataframe df
-        min_date = df['snapped_at_datetime'].min()
-        max_date = df['snapped_at_datetime'].max()
-
-        with st.expander("**Backtesting Period**"):
-            selected_from_date, selected_to_date = st.date_input("Select Date Range", [min_date, max_date])
+            # Set the min and max date from the dataframe df
+            min_date = df['snapped_at_datetime'].min()
+            max_date = df['snapped_at_datetime'].max()
 
         with st.expander("**Your Loan Terms**", expanded=True):
             ltv_detailed = st.number_input("LTV:", min_value=0.01, max_value=1.0, value=.3, format="%.4f")
             tenor_detailed = st.number_input("Loan Tenor (days):", min_value=1, max_value=365, value=90)
             apr_detailed = st.number_input("APR:", min_value=0.0, max_value=1.0, value=0.02, format="%.4f")
             upfront_fee_detailed = st.number_input("Upfront Fee:", min_value=0.0, max_value=100.0, value=0.005, format="%.4f")
-    
-    # Read and process data
-    df = read_and_process_data(collateral_currency, loan_currency)
-        
+
     # Plot the time series at the top
     time_series_fig, df_filtered = plot_price_over_time(df, selected_from_date, selected_to_date, collateral_currency, loan_currency)
 
