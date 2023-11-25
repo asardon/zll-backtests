@@ -10,6 +10,14 @@ import matplotlib.ticker as ticker
 from scipy.stats import norm
 import requests
 from datetime import datetime, timedelta
+import base64
+
+# Function to generate a download link for the CSV
+def generate_csv_download_link(df, filename="results.csv", text="Download CSV"):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+    return href
 
 @st.cache_data
 def get_tokens():
@@ -213,8 +221,8 @@ def read_and_process_data(collateral_currency, loan_currency, selected_from_date
 
         df = df_collateral.merge(df_loan, on='timestamp', suffixes=('_coll', '_loan'))
 
-        df['price_loan'] = df['price_coll'] 
-        df['price_coll'] = df_collateral['price_loan']
+        df['price_coll'] = df_collateral['price']
+        df['price_loan'] = df_loan['price'] 
 
     df['price_coll_vs_usd'] = df_collateral['price']
 
@@ -304,7 +312,7 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
     df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
     span = 90
     df_filtered['volatility'] = df_filtered['log_returns'].ewm(span=span).std() * (365**0.5)
-    df_filtered.to_csv('awdawdwa.csv')
+
     ax2.plot(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color='red', label='Volatility')
     ax2.fill_between(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color="red", alpha=0.3)
     ax2.set_title('Annualized Volatility: {} vs {} \n ({}-Day EWM Rolling Window)'.format(collateral_currency, loan_currency, span), fontsize=20, fontweight="bold")
@@ -445,6 +453,8 @@ def main():
 
     results_df = simulate_strategy(df_filtered, 'price', tenor_detailed, ltv_detailed, upfront_fee_detailed, apr_detailed)
     results_df['cumulative_roi'] = results_df['net_roi'].cumsum()
+
+    st.markdown(generate_csv_download_link(results_df), unsafe_allow_html=True)
 
     # Define global x-axis limits
     min_date = results_df['loan_inception_time'].min()
