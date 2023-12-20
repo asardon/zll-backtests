@@ -45,11 +45,13 @@ def get_available_tokens():
         else:
             # Handle the case when the request was not successful
             print("Error: Unable to fetch token list from CoinGecko API.")
-            return []
+            st.error(f"Error: Unable to fetch token names. Status code: {response.status_code}")
+            return None, None
 
     except Exception as e:
         print("Error:", str(e))
-        return []
+        st.error(f"Error: Unable to fetch token names. Status code: {response.status_code}")
+        return None, None
 
 @st.cache_data
 def get_historical_data_cg(token_id, vs_currency, date_from, date_to):
