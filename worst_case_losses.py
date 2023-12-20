@@ -20,25 +20,64 @@ def generate_csv_download_link(df, filename="results.csv", text="Download CSV"):
     return href
 
 @st.cache_data
-def get_tokens():
-    url = "https://api.coingecko.com/api/v3/coins/list"
-    response = requests.get(url)
-    data = response.json()
-    return [coin['id'] for coin in data if 'id' in coin]
+def get_available_tokens():
+    try:
+        # CoinGecko API endpoint to get a list of cryptocurrencies
+        api_url = "https://api.coingecko.com/api/v3/coins/list"
+
+        # Send a GET request to the API
+        response = requests.get(api_url)
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the JSON response
+            data = response.json()
+
+            # Extract and return the list of token symbols
+            token_dropdown_names = []
+            token_dropdown_names_to_id = {}
+            for entry in data:
+                dropdown_name = f'{entry["name"]} ({entry["symbol"].upper()})'
+                token_dropdown_names.append(dropdown_name)
+                token_dropdown_names_to_id[dropdown_name] = {"id": entry["id"], "name": entry["name"], "symbol": entry["symbol"].upper()}
+            return token_dropdown_names, token_dropdown_names_to_id
+
+        else:
+            # Handle the case when the request was not successful
+            print("Error: Unable to fetch token list from CoinGecko API.")
+            return []
+
+    except Exception as e:
+        print("Error:", str(e))
+        return []
 
 @st.cache_data
 def get_historical_data_cg(token_id, vs_currency, date_from, date_to):
+    if date_from >= date_to:
+        st.warning("Start date should be earlier than end date.")
+        return None
+
     url = f"https://api.coingecko.com/api/v3/coins/{token_id}/market_chart/range"
+
     params = {
         'vs_currency': vs_currency,
-        'from': date_from.timestamp(),
-        'to': date_to.timestamp()
+        'from': int(date_from.timestamp()),
+        'to': int(date_to.timestamp())
     }
-    response = requests.get(url, params=params)
-    data = response.json()
-    prices = pd.DataFrame(data['prices'], columns=['timestamp', 'price'])
-    prices['timestamp'] = pd.to_datetime(prices['timestamp'], unit='ms')
-    return prices
+
+    try:
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            prices = pd.DataFrame(data['prices'], columns=['timestamp', 'price'])
+            prices['timestamp'] = pd.to_datetime(prices['timestamp'], unit='ms')
+            return prices
+        else:
+            st.error(f"Error: Unable to fetch historical price data for token {token_id}. Status code: {response.status_code} {params}")
+            return None
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None
 
 def black_scholes_call(S, K, t, r, sigma):
     t = t / 365.
@@ -202,27 +241,13 @@ def read_and_process_data(collateral_currency, loan_currency, selected_from_date
     date_from = pd.to_datetime(selected_from_date)  # Start date
     date_to = pd.to_datetime(selected_to_date)      # End date
 
-    # Logic to handle different cases (collateral vs. loan currency)
-    if loan_currency == 'USD' and collateral_currency != 'USD':
-        df_collateral = get_historical_data_cg(collateral_currency, 'usd', date_from, date_to)
-        df = df_collateral
-        df['price_loan'] = df_collateral['price'] * 0 + 1.
-        df['price_coll'] = df_collateral['price']
-    
-    if collateral_currency == 'USD' and loan_currency != 'USD':
-        df_loan = get_historical_data_cg(loan_currency, 'usd', date_from, date_to)
-        df = df_loan
-        df['price_loan'] = 1 / df_loan['price']  # Reciprocal for USD loan
-        df['price_coll'] = df_loan['price'] * 0 + 1.
-    
-    if collateral_currency != 'USD' and loan_currency != 'USD':
-        df_collateral = get_historical_data_cg(collateral_currency, 'usd', date_from, date_to)
-        df_loan = get_historical_data_cg(loan_currency, 'usd', date_from, date_to)
+    df_collateral = get_historical_data_cg(collateral_currency, 'usd', date_from, date_to)
+    df_loan = get_historical_data_cg(loan_currency, 'usd', date_from, date_to)
 
-        df = df_collateral.merge(df_loan, on='timestamp', suffixes=('_coll', '_loan'))
+    df = df_collateral.merge(df_loan, on='timestamp', suffixes=('_coll', '_loan'))
 
-        df['price_coll'] = df_collateral['price']
-        df['price_loan'] = df_loan['price'] 
+    df['price_coll'] = df_collateral['price']
+    df['price_loan'] = df_loan['price'] 
 
     df['price_coll_vs_usd'] = df_collateral['price']
 
@@ -415,23 +440,29 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
 
 def main():    
     # Sidebar for input selection
-    currencies = ['USD'] + get_tokens()
+    token_dropdown_names, token_dropdown_names_to_id = get_available_tokens()
+    
     with st.sidebar:
         with st.expander("**Asset Pair**", expanded=True):
             # Check if 'RPL' and 'USD' are in the list
-            default_collateral_index = currencies.index("ethereum") if "ethereum" in currencies else 0
-            default_loan_index = currencies.index('USD') if 'USD' in currencies else 0
+            default_collateral_index = token_dropdown_names.index("Ethereum (ETH)")
+            default_loan_index = token_dropdown_names.index("USDC (USDC)")
 
-            collateral_currency = st.selectbox("Select Collateral Token", currencies, index=default_collateral_index)
-            loan_currencies = [currency for currency in currencies if currency != collateral_currency]
-            loan_currency = st.selectbox("Select Loan Token", loan_currencies, index=default_loan_index)
-            
+            collateral_currency_dropdown = st.selectbox("Select Collateral Token", token_dropdown_names, index=default_collateral_index)
+            loan_currency_dropdown = st.selectbox("Select Loan Token", token_dropdown_names, index=default_loan_index)
+
+            collateral_currency = token_dropdown_names_to_id[collateral_currency_dropdown]['symbol']
+            loan_currency = token_dropdown_names_to_id[loan_currency_dropdown]['symbol']
+
+            collateral_currency_id = token_dropdown_names_to_id[collateral_currency_dropdown]['id']
+            loan_currency_id = token_dropdown_names_to_id[loan_currency_dropdown]['id']
+
             today = datetime.today()
-            two_years_ago = today - timedelta(days=730)
+            from_date = today - timedelta(days=180)
             
-            selected_from_date, selected_to_date = st.date_input("Select Date Range", [two_years_ago, today])
+            selected_from_date, selected_to_date = st.date_input("Select Date Range", [from_date, today])
 
-            df = read_and_process_data(collateral_currency, loan_currency, selected_from_date, selected_to_date)
+            df = read_and_process_data(collateral_currency_id, loan_currency_id, selected_from_date, selected_to_date)
 
             # Set the min and max date from the dataframe df
             min_date = df['snapped_at_datetime'].min()
