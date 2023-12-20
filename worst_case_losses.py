@@ -460,10 +460,10 @@ def main():
             loan_currency_id = token_dropdown_names_to_id[loan_currency_dropdown]['id']
 
             today = datetime.today()
-            from_date = today - timedelta(days=180)
+            from_date = today - timedelta(days=500)
             
             selected_from_date, selected_to_date = st.date_input("Select Date Range", [from_date, today])
-
+            
             df = read_and_process_data(collateral_currency_id, loan_currency_id, selected_from_date, selected_to_date)
 
             # Set the min and max date from the dataframe df
@@ -472,7 +472,8 @@ def main():
 
         with st.expander("**Your Loan Terms**", expanded=True):
             ltv_detailed = st.number_input("LTV:", min_value=0.01, max_value=1.0, value=.3, format="%.4f")
-            tenor_detailed = st.number_input("Loan Tenor (days):", min_value=1, max_value=365, value=90)
+            max_tenor = (selected_to_date - selected_from_date).days
+            tenor_detailed = st.number_input("Loan Tenor (days):", min_value=1, max_value=min([max_tenor, 365]), value=90)
             apr_detailed = st.number_input("APR:", min_value=0.0, max_value=1.0, value=0.02, format="%.4f")
             upfront_fee_detailed = st.number_input("Upfront Fee:", min_value=0.0, max_value=100.0, value=0.005, format="%.4f")
 
@@ -489,9 +490,6 @@ def main():
 
     st.markdown(generate_csv_download_link(results_df), unsafe_allow_html=True)
 
-    # Define global x-axis limits
-    min_date = results_df['loan_inception_time'].min()
-    max_date = results_df['loan_inception_time'].max()
     # Define axes positions
     left = 0.12
     bottom = 0.1
