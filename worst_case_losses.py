@@ -460,7 +460,7 @@ def main():
             loan_currency_id = token_dropdown_names_to_id[loan_currency_dropdown]['id']
 
             today = datetime.today()
-            from_date = today - timedelta(days=500)
+            from_date = today - timedelta(days=365)
             
             selected_from_date, selected_to_date = st.date_input("Select Date Range", [from_date, today])
             
