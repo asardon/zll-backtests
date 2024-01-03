@@ -335,9 +335,8 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
                  fontsize=15,
                  color='blue')
     
-    # Calculate trailing volatility (e.g., 30-day rolling std deviation)
     df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
-    span = 90
+    span = 9
     df_filtered['volatility'] = df_filtered['log_returns'].ewm(span=span).std() * (365**0.5)
 
     ax2.plot(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color='red', label='Volatility')
