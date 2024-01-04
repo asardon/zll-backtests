@@ -335,9 +335,9 @@ def plot_price_over_time(df, selected_from_date, selected_to_date, collateral_cu
                  fontsize=15,
                  color='blue')
     
-    df_filtered['log_returns'] = np.log(df_filtered['price'] / df_filtered['price'].shift(1))
+    df_filtered['return'] = df_filtered['price'].pct_change()
     span = 9
-    df_filtered['volatility'] = df_filtered['log_returns'].ewm(span=span).std() * (365**0.5)
+    df_filtered['volatility'] = df_filtered['return'].ewm(span=span).std() * (365**0.5)
 
     ax2.plot(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color='red', label='Volatility')
     ax2.fill_between(df_filtered['snapped_at_datetime'], df_filtered['volatility']*100, color="red", alpha=0.3)
